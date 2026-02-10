@@ -32,10 +32,7 @@ RUN apt-get update && apt-get install -y \
 # Make python/pip the default commands
 # NOTE: On Ubuntu 20.04 + ROS Noetic, we must keep the system Python (3.8) as default.
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
-    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1 && \
-    python3 -m pip install --upgrade pip wheel && \
-    # Pin setuptools to keep older extension builds happy
-    python3 -m pip install "setuptools==65.7.0" "packaging==24.2"
+    update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
 
 # --------------------------------------------------------
 # 2. Prepare host (SSH, NGINX)
@@ -49,12 +46,20 @@ COPY proxy/readme.html /usr/share/nginx/html/readme.html
 # --------------------------------------------------------
 # 3. Install PyTorch with CUDA 12.1 support
 # --------------------------------------------------------
-RUN python3 -m pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
+# Create venv (this IS our "environment") and install everything into it
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+RUN python -m pip install --upgrade pip wheel && \
+    # Pin setuptools to keep older extension builds happy
+    python -m pip install "setuptools==65.7.0" "packaging==24.2"
+
+RUN python -m pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
 
 # --------------------------------------------------------
 # 4. Install JupyterLab
 # --------------------------------------------------------
-RUN python3 -m pip install jupyterlab
+RUN python -m pip install jupyterlab
 
 # --------------------------------------------------------
 # 5. Clone some project repository
@@ -65,7 +70,7 @@ WORKDIR /workspace
 # 6. Install project dependencies
 # --------------------------------------------------------
 # 6.1 Install CMake via pip (your runtime had /usr/bin/cmake missing/overlaid)
-RUN python3 -m pip install "cmake==3.27.9"
+RUN python -m pip install "cmake==3.27.9"
 
 # 6.2 Clone ActiveSplat + submodules
 RUN mkdir -p /workspace/activesplat_ws/src && \
@@ -74,19 +79,25 @@ RUN mkdir -p /workspace/activesplat_ws/src && \
     cd ActiveSplat && \
     git submodule update --init --progress --recursive
 
+# (Recommended) install project python deps into venv
+RUN python -m pip install -r /workspace/activesplat_ws/src/ActiveSplat/requirements.txt || true
+
+# Your missing runtime deps from mapper_node
+RUN python -m pip install open3d trimesh
+
 # 6.3 Install diff-gaussian-rasterization (needs torch in current env; avoid build isolation)
 RUN cd /workspace/activesplat_ws/src/ActiveSplat/submodules/diff-gaussian-rasterization && \
-    python3 setup.py install && \
-    python3 -m pip install --no-build-isolation .
+    python setup.py install && \
+    python -m pip install --no-build-isolation .
 
 # 6.4 Install Habitat-Lab/Baselines v0.2.3
 RUN cd /workspace/activesplat_ws/src/ActiveSplat/submodules/habitat/habitat-lab && \
     git checkout tags/v0.2.3 && \
-    python3 -m pip install -e habitat-lab && \
-    python3 -m pip install -e habitat-baselines
+    pip install -e habitat-lab && \
+    pip install -e habitat-baselines
 
 # 6.5 Python runtime deps that easy_install choked on (matplotlib)
-RUN python3 -m pip install "matplotlib==3.7.5"
+RUN python -m pip install "matplotlib==3.7.5"
 
 # 6.6 Build/Install habitat-sim v0.2.3 with CUDA
 #     - First build via setup.py (as in README)
@@ -95,12 +106,13 @@ RUN cd /workspace/activesplat_ws/src/ActiveSplat/submodules/habitat/habitat-sim 
     git checkout tags/v0.2.3 && \
     git submodule update --init --progress --recursive && \
     rm -rf build && \
-    export PATH="/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" && \
     export MAX_JOBS=2 && \
     export CMAKE_BUILD_PARALLEL_LEVEL=2 && \
     export CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=86" && \
-    python3 setup.py install --with-cuda && \
-    python3 -m pip install --no-build-isolation .
+    python setup.py install --with-cuda && \
+    python -m pip install --no-build-isolation . && \
+    python -c "import habitat_sim; print('habitat_sim OK:', habitat_sim.__version__)" && \
+    python -c "import habitat; print('habitat OK:', habitat.__file__)"
 
 # 6.7 Install ROS Noetic + catkin + required ROS deps (cv_bridge, tf, etc.)
 RUN apt-get update && \
@@ -114,20 +126,22 @@ RUN apt-get update && \
       ros-noetic-image-transport \
       ros-noetic-sensor-msgs \
       ros-noetic-tf \
-      # roslaunch requires netifaces; on focal this is built for system Python 3.8
+      # roslaunch runs with /usr/bin/python3 and needs netifaces there
       python3-netifaces \
     && rm -rf /var/lib/apt/lists/*
 
 # 6.8 Build catkin workspace (activesplat package)
+# Important: make catkin use our venv python so ROS nodes run in the same env as habitat/open3d/etc.
 RUN source /opt/ros/noetic/setup.bash && \
     cd /workspace/activesplat_ws && \
-    catkin_make -DPYTHON_EXECUTABLE=/usr/bin/python3
+    catkin_make -DPYTHON_EXECUTABLE=/opt/venv/bin/python
 
 # 6.9 Convenience: auto-source ROS + workspace for interactive shells
-RUN echo "export PATH=/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH" >> /root/.bashrc && \
+RUN echo "export PATH=/opt/venv/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH" >> /root/.bashrc && \
     echo "source /opt/ros/noetic/setup.bash" >> /root/.bashrc && \
     echo "source /workspace/activesplat_ws/devel/setup.bash" >> /root/.bashrc && \
-    echo "cd /workspace/activesplat_ws/src/ActiveSplat" >> /root/.bashrc
+    echo "cd /workspace/activesplat_ws/src/ActiveSplat" >> /root/.bashrc && \
+    echo "python -c \"import habitat; import habitat_sim; print('OK: habitat+habitat_sim')\"" >> /root/.bashrc
 
 # --------------------------------------------------------
 # 7. Default working directory and entrypoint
