@@ -1,120 +1,116 @@
 FROM nvidia/cuda:11.8.0-devel-ubuntu20.04
 
-# Use bash for RUN so we can `source` ROS and use `&&` safely
 SHELL ["/bin/bash", "-lc"]
 
 ENV DEBIAN_FRONTEND=noninteractive \
-    TORCH_CUDA_ARCH_LIST="8.6+PTX" \
-    HF_HUB_ENABLE_HF_TRANSFER=1 \
-    PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    # Make sure basic bins + CUDA are always visible (you had PATH issues at runtime)
-    PATH="/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
-    # CMake args for habitat-sim CUDA build (adjust 86 if your GPU is not RTX30/A10)
-    CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=86 -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
-# --------------------------------------------------------
-# 1. Base system packages
-# --------------------------------------------------------
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DEFAULT_TIMEOUT=180 \
+    PIP_RETRIES=10 \
+    TORCH_CUDA_ARCH_LIST="8.6+PTX" \
+    CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=86" \
+    PATH="/opt/conda/condabin:/opt/conda/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+WORKDIR /opt
+
 RUN apt-get update && apt-get install -y \
     software-properties-common \
-    python3 python3-dev python3-venv python3-pip \
-    git tmux wget curl ca-certificates openssh-server nginx \
-    libgl1-mesa-glx libglib2.0-0 \
-    build-essential ninja-build pkg-config \
-    libegl1-mesa-dev libgl1-mesa-dev \
-    libx11-6 libxext6 libxi6 libxrender1 \
-    # GLFW/X11 deps needed by habitat-sim build
-    libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev \
-    ffmpeg vim \
-    lsb-release gnupg2 \
+    build-essential \
+    git \
+    wget \
+    curl \
+    ca-certificates \
+    tmux \
+    vim \
+    ffmpeg \
+    pkg-config \
+    ninja-build \
+    openssh-server \
+    nginx \
+    lsb-release \
+    gnupg2 \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libegl1-mesa-dev \
+    libgl1-mesa-dev \
+    libx11-6 \
+    libxext6 \
+    libxi6 \
+    libxrender1 \
+    libxrandr-dev \
+    libxinerama-dev \
+    libxcursor-dev \
+    libxi-dev \
+    python3 \
+    python3-dev \
+    python3-pip \
+    python3-venv \
+    python3-netifaces \
     && rm -rf /var/lib/apt/lists/*
 
-# Make python/pip the default commands
-# NOTE: On Ubuntu 20.04 + ROS Noetic, we must keep the system Python (3.8) as default.
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3 1 && \
     update-alternatives --install /usr/bin/pip pip /usr/bin/pip3 1
 
-# --------------------------------------------------------
-# 2. Prepare host (SSH, NGINX)
-# --------------------------------------------------------
+RUN wget -q https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O /tmp/miniconda.sh && \
+    bash /tmp/miniconda.sh -b -p /opt/conda && \
+    rm -f /tmp/miniconda.sh && \
+    source /opt/conda/etc/profile.d/conda.sh && \
+    conda config --system --set auto_activate_base false
+
 RUN rm -f /etc/ssh/ssh_host_*
 
-# NGINX Proxy
 COPY proxy/nginx.conf /etc/nginx/nginx.conf
 COPY proxy/readme.html /usr/share/nginx/html/readme.html
 
-# --------------------------------------------------------
-# 3. Install PyTorch with CUDA 12.1 support
-# --------------------------------------------------------
-# Create venv (this IS our "environment") and install everything into it
-RUN python3 -m venv /opt/venv
-ENV PATH="/opt/venv/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
-
-RUN python -m pip install --upgrade pip wheel && \
-    # Pin setuptools to keep older extension builds happy
-    python -m pip install "setuptools==65.7.0" "packaging==24.2"
-
-RUN python -m pip install torch==2.0.1 torchvision==0.15.2 torchaudio==2.0.2 --index-url https://download.pytorch.org/whl/cu118
-
-# --------------------------------------------------------
-# 4. Install JupyterLab
-# --------------------------------------------------------
-RUN python -m pip install jupyterlab
-
-# --------------------------------------------------------
-# 5. Clone some project repository
-# --------------------------------------------------------
-WORKDIR /workspace
-
-# --------------------------------------------------------
-# 6. Install project dependencies
-# --------------------------------------------------------
-# 6.1 Install CMake via pip (your runtime had /usr/bin/cmake missing/overlaid)
-RUN python -m pip install "cmake==3.27.9"
-
-# 6.2 Clone ActiveSplat + submodules
-RUN mkdir -p /workspace/activesplat_ws/src && \
-    cd /workspace/activesplat_ws/src && \
+RUN mkdir -p /opt/activesplat_ws/src && \
+    cd /opt/activesplat_ws/src && \
     git clone https://github.com/Li-Yuetao/ActiveSplat.git && \
     cd ActiveSplat && \
     git submodule update --init --progress --recursive
 
-# (Recommended) install project python deps into venv
-RUN python -m pip install -r /workspace/activesplat_ws/src/ActiveSplat/requirements.txt || true
+WORKDIR /opt/activesplat_ws/src/ActiveSplat
 
-# Your missing runtime deps from mapper_node
-RUN python -m pip install open3d trimesh
+RUN source /opt/conda/etc/profile.d/conda.sh && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main && \
+    conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r && \
+    conda env create -f environment.yaml
 
-# 6.3 Install diff-gaussian-rasterization (needs torch in current env; avoid build isolation)
-RUN cd /workspace/activesplat_ws/src/ActiveSplat/submodules/diff-gaussian-rasterization && \
-    python setup.py install && \
-    python -m pip install --no-build-isolation .
+ENV PATH="/opt/conda/envs/ActiveSplat/bin:/opt/conda/condabin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# 6.4 Install Habitat-Lab/Baselines v0.2.3
-RUN cd /workspace/activesplat_ws/src/ActiveSplat/submodules/habitat/habitat-lab && \
+RUN /opt/conda/envs/ActiveSplat/bin/python -m pip install --upgrade pip && \
+    /opt/conda/envs/ActiveSplat/bin/python -m pip install \
+      "setuptools==65.7.0" \
+      "packaging==24.2" \
+      "cmake==3.27.9" && \
+    /opt/conda/envs/ActiveSplat/bin/python -m pip install \
+      torch==2.0.1+cu118 \
+      torchvision==0.15.2+cu118 \
+      torchaudio==2.0.2+cu118 \
+      --extra-index-url https://download.pytorch.org/whl/cu118 && \
+    /opt/conda/envs/ActiveSplat/bin/python -c "import torch; print(torch.__version__, torch.version.cuda)" && \
+    /opt/conda/envs/ActiveSplat/bin/python -m pip install -r requirements.txt && \
+    /opt/conda/envs/ActiveSplat/bin/python -m pip install \
+      jupyterlab \
+      open3d \
+      trimesh \
+      "matplotlib==3.7.5"
+
+RUN cd /opt/activesplat_ws/src/ActiveSplat/submodules/diff-gaussian-rasterization && \
+    /opt/conda/envs/ActiveSplat/bin/python -m pip install --no-build-isolation .
+
+RUN cd /opt/activesplat_ws/src/ActiveSplat/submodules/habitat/habitat-lab && \
     git checkout tags/v0.2.3 && \
-    pip install -e habitat-lab && \
-    pip install -e habitat-baselines
+    /opt/conda/envs/ActiveSplat/bin/python -m pip install -e habitat-lab && \
+    /opt/conda/envs/ActiveSplat/bin/python -m pip install -e habitat-baselines
 
-# 6.5 Python runtime deps that easy_install choked on (matplotlib)
-RUN python -m pip install "matplotlib==3.7.5"
-
-# 6.6 Build/Install habitat-sim v0.2.3 with CUDA
-#     - First build via setup.py (as in README)
-#     - Then ensure it's importable in our /usr/local python by pip install --no-build-isolation .
-RUN cd /workspace/activesplat_ws/src/ActiveSplat/submodules/habitat/habitat-sim && \
+RUN cd /opt/activesplat_ws/src/ActiveSplat/submodules/habitat/habitat-sim && \
     git checkout tags/v0.2.3 && \
     git submodule update --init --progress --recursive && \
-    rm -rf build && \
     export MAX_JOBS=2 && \
     export CMAKE_BUILD_PARALLEL_LEVEL=2 && \
-    export CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=86" && \
-    python setup.py install --with-cuda && \
-    python -m pip install --no-build-isolation . && \
-    python -c "import habitat_sim; print('habitat_sim OK:', habitat_sim.__version__)" && \
-    python -c "import habitat; print('habitat OK:', habitat.__file__)"
+    /opt/conda/envs/ActiveSplat/bin/python setup.py install --with-cuda && \
+    /opt/conda/envs/ActiveSplat/bin/python -c "import habitat_sim; print(habitat_sim.__file__)"
 
-# 6.7 Install ROS Noetic + catkin + required ROS deps (cv_bridge, tf, etc.)
 RUN apt-get update && \
     sh -c 'echo "deb http://packages.ros.org/ros/ubuntu $(lsb_release -sc) main" > /etc/apt/sources.list.d/ros1-latest.list' && \
     curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.asc | apt-key add - && \
@@ -126,28 +122,28 @@ RUN apt-get update && \
       ros-noetic-image-transport \
       ros-noetic-sensor-msgs \
       ros-noetic-tf \
-      # roslaunch runs with /usr/bin/python3 and needs netifaces there
-      python3-netifaces \
     && rm -rf /var/lib/apt/lists/*
 
-# 6.8 Build catkin workspace (activesplat package)
-# Important: make catkin use our venv python so ROS nodes run in the same env as habitat/open3d/etc.
+RUN /opt/conda/envs/ActiveSplat/bin/python -m pip uninstall -y empy || true && \
+    /opt/conda/envs/ActiveSplat/bin/python -m pip install \
+      "empy==3.3.4" \
+      catkin_pkg \
+      rospkg
+
+WORKDIR /opt/activesplat_ws
+
 RUN source /opt/ros/noetic/setup.bash && \
-    cd /workspace/activesplat_ws && \
-    catkin_make -DPYTHON_EXECUTABLE=/opt/venv/bin/python
+    catkin_make -DPYTHON_EXECUTABLE=/opt/conda/envs/ActiveSplat/bin/python
 
-# 6.9 Convenience: auto-source ROS + workspace for interactive shells
-RUN echo "export PATH=/opt/venv/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH" >> /root/.bashrc && \
-    echo "source /opt/ros/noetic/setup.bash" >> /root/.bashrc && \
-    echo "source /workspace/activesplat_ws/devel/setup.bash" >> /root/.bashrc && \
-    echo "cd /workspace/activesplat_ws/src/ActiveSplat" >> /root/.bashrc && \
-    echo "python -c \"import habitat; import habitat_sim; print('OK: habitat+habitat_sim')\"" >> /root/.bashrc
+RUN echo 'source /opt/conda/etc/profile.d/conda.sh' >> /root/.bashrc && \
+    echo 'conda activate ActiveSplat' >> /root/.bashrc && \
+    echo 'source /opt/ros/noetic/setup.bash' >> /root/.bashrc && \
+    echo 'source /opt/activesplat_ws/devel/setup.bash' >> /root/.bashrc && \
+    echo 'cd /opt/activesplat_ws/src/ActiveSplat' >> /root/.bashrc
 
-# --------------------------------------------------------
-# 7. Default working directory and entrypoint
-# --------------------------------------------------------
-# Start Script
 COPY scripts/start.sh /start.sh
 RUN chmod 755 /start.sh
-WORKDIR /workspace/activesplat_ws/src/ActiveSplat
+
+WORKDIR /opt/activesplat_ws/src/ActiveSplat
+
 CMD ["/start.sh"]
