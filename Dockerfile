@@ -9,7 +9,9 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_RETRIES=10 \
     TORCH_CUDA_ARCH_LIST="8.6+PTX" \
     CMAKE_ARGS="-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc -DCMAKE_CUDA_ARCHITECTURES=86" \
-    PATH="/opt/conda/condabin:/opt/conda/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+    PATH="/opt/conda/condabin:/opt/conda/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=all
 
 WORKDIR /opt
 
@@ -31,6 +33,9 @@ RUN apt-get update && apt-get install -y \
     gnupg2 \
     libgl1-mesa-glx \
     libglib2.0-0 \
+    libglvnd0 \
+    libglvnd-dev \
+    libegl1 \
     libegl1-mesa-dev \
     libgl1-mesa-dev \
     libx11-6 \
